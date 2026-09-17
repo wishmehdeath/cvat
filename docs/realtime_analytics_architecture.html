@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>CVAT Real-Time Analytics Architecture</title>
+<style>
+  @page {
+    size: A4;
+    margin: 16mm 14mm 16mm 14mm;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    color: #24292f;
+    line-height: 1.6;
+    font-size: 13.5px;
+    padding: 10px 15px;
+  }
+  h1 {
+    font-size: 22px;
+    border-bottom: 2px solid #1890ff;
+    padding-bottom: 8px;
+    color: #0969da;
+    margin-top: 10px;
+  }
+  h2 {
+    font-size: 17px;
+    border-bottom: 1px solid #d0d7de;
+    padding-bottom: 6px;
+    margin-top: 22px;
+    color: #1f2328;
+  }
+  h3 {
+    font-size: 14.5px;
+    margin-top: 16px;
+    color: #24292f;
+  }
+  p, li {
+    color: #24292f;
+  }
+  li {
+    margin-left: 20px;
+    margin-bottom: 4px;
+  }
+  hr {
+    border: none;
+    border-top: 1px solid #e1e4e8;
+    margin: 18px 0;
+  }
+  .code-block {
+    background-color: #f6f8fa;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    padding: 12px;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 1.45;
+    page-break-inside: avoid;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  code {
+    background-color: rgba(175, 184, 193, 0.2);
+    padding: 2px 5px;
+    border-radius: 4px;
+    font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
+    font-size: 12px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0;
+    page-break-inside: avoid;
+    font-size: 13px;
+  }
+  th, td {
+    border: 1px solid #d0d7de;
+    padding: 8px 12px;
+    text-align: left;
+  }
+  th {
+    background-color: #f6f8fa;
+    font-weight: 600;
+  }
+  tr:nth-child(even) {
+    background-color: #fcfcfc;
+  }
+</style>
+</head>
+<body>
+<h1>CVAT Real-Time Analytics & Class-Wise Image Visualization: System Architecture & Implementation Report</h1><br/><p><strong>Position</strong>: Full Stack Developer  </p><p><strong>Evaluation Task</strong>: Advanced System  </p><p><strong>Branch</strong>: <code>dev-test01</code>  </p><p><strong>Django App</strong>: <code>cvat.apps.test</code>  </p><p><strong>Frontend Module</strong>: <code>cvat-ui/src/components/realtime-analytics</code>  </p><br/><hr/><br/><h2>1. Executive Summary & Objective</h2><br/><p>This document provides a comprehensive technical breakdown of the real-time analytics extension implemented for <strong>CVAT (Computer Vision Annotation Tool)</strong>. </p><br/><p>The primary objective is to extend CVAT with a high-performance, real-time analytics subsystem that:</p><p>1. <strong>Extracts and aggregates annotation data</strong> across CVAT's core annotation models (<code>LabeledShape</code>, <code>LabeledImage</code>, and <code>TrackedShape</code>).</p><p>2. <strong>Computes class-wise image counts</strong>, accurately distinguishing between total object instances and distinct images/frames containing each class.</p><p>3. <strong>Delivers live telemetry via WebSockets</strong> directly to the client browser upon annotation creation, modification, or deletion.</p><p>4. <strong>Visualizes live distribution metrics</strong> in an interactive frontend dashboard built with React, Ant Design, and Chart.js.</p><p>5. <strong>Maintains rock-solid stability</strong>, employing exponential backoff reconnection, heartbeat monitoring, and automatic HTTP polling fallback.</p><br/><hr/><br/><h2>2. Understanding CVAT Architecture</h2><br/><p>CVAT is an enterprise-grade, distributed annotation platform designed for large-scale computer vision datasets. Its architecture consists of several tightly integrated layers:</p><br/><pre class="code-block"><code>                                  +-----------------------+
+                                  |   Web Browser Client  |
+                                  | (React + TypeScript)  |
+                                  +-----------+-----------+
+                                              |
+                          HTTP REST &amp; WebSocket (ws:// / wss://)
+                                              |
+                                  +-----------v-----------+
+                                  |     Nginx Gateway     |
+                                  |  (Reverse Proxy / SSL)|
+                                  +-----------+-----------+
+                                              |
+                                      Unix Socket / HTTP
+                                              |
+                         +--------------------v--------------------+
+                         |             CVAT Server                 |
+                         |  Uvicorn (ASGI 3.0) + Django 4.x / DRF  |
+                         |  +-----------------------------------+  |
+                         |  |        cvat.apps.engine           |  |
+                         |  |        cvat.apps.dataset_manager  |  |
+                         |  |        cvat.apps.test (Analytics) |  |
+                         |  +-----------------------------------+  |
+                         +--------+-----------------------+--------+
+                                  |                       |
+                             SQL Queries              Cache / PubSub
+                                  |                       |
+                     +------------v-----------+  +--------v--------+
+                     |   PostgreSQL Database  |  |  Redis Broker   |
+                     |  (Relational Storage)  |  | (RQ &amp; Channels) |
+                     +------------------------+  +-----------------+</code></pre><br/><h3>2.1 Backend Architecture</h3><li><strong>Web Server Gateway</strong>: Nginx acts as the front door, terminating TLS, serving static bundles, and proxying incoming HTTP and WebSocket connections through <code>/tmp/cvat/uvicorn.sock</code>.</li><li><strong>Application Server (ASGI)</strong>: Powered by <code>uvicorn[standard]</code> executing Django as an ASGI application. This native ASGI architecture allows CVAT to serve both standard synchronous/asynchronous HTTP endpoints and persistent WebSocket duplex streams within the same server environment.</li><li><strong>Data Layer (PostgreSQL)</strong>: Stores system metadata, users, organizations, projects, tasks, jobs, frames, and annotations.</li><li><strong>Message Broker & Task Queue (Redis & RQ)</strong>: Manages asynchronous workloads (dataset imports/exports, cloud storage synchronization, model inference) and serves as an in-memory cache.</li><br/><h3>2.2 CVAT Annotation Domain Hierarchy</h3><p>The annotation data structure is strictly organized into a hierarchical tree:</p><p>1. <strong>Project</strong>: Optional high-level grouping sharing a common label taxonomy.</p><p>2. <strong>Task</strong>: Represents a dataset source (video file, image directory, archive). Contains a <code>Data</code> entity defining <code>size</code> (number of frames).</p><p>3. <strong>Segment</strong>: Partitions task data into contiguous frame intervals (e.g. frames 0–99, 100–199) to enable distributed annotation workloads.</p><p>4. <strong>Job</strong>: The atomic unit of work assigned to an annotator, directly bound to a <code>Segment</code>.</p><p>5. <strong>Labels</strong>: Definitions of annotation classes (<code>car</code>, <code>pedestrian</code>, <code>traffic_light</code>), each possessing a unique ID, name, display color, and attribute schema.</p><p>6. <strong>Annotation Instances</strong>:</p><p>   - <code>LabeledShape</code>: Static geometry (rectangle, polygon, polyline, points, cuboid, mask) on a specific <code>frame</code> within a <code>job</code>.</p><p>   - <code>LabeledImage</code>: Frame-level tag/classification on a specific <code>frame</code>.</p><p>   - <code>LabeledTrack</code>: Temporal object tracking across frames, consisting of <code>TrackedShape</code> entries for each keyframe/interpolated frame.</p><br/><hr/><br/><h2>3. Data Flow Explanation</h2><br/><p>The end-to-end data lifecycle spans user canvas interactions to real-time graph re-renders:</p><br/><pre class="code-block"><code>[Annotator draws/edits shape on Canvas]
+                 │
+                 ▼
+[cvat-ui sends PATCH /api/jobs/{id}/annotations]
+                 │
+                 ▼
+[cvat.apps.dataset_manager.task.patch_job_data]
+                 │
+                 ▼
+[PostgreSQL transaction commits LabeledShape / LabeledTrack]
+                 │
+                 ▼
+[Django Signal (post_save/post_delete) &amp; Plugin Hook intercepted]
+                 │
+                 ▼
+[cvat.apps.test.signals._trigger_update_for_job(job_id)]
+                 │
+                 ▼
+[cvat.apps.test.services.AnalyticsService.get_class_wise_counts()]
+  ├─ 1. Query distinct (label_id, frame) from LabeledShape
+  ├─ 2. Query distinct (label_id, frame) from LabeledImage
+  ├─ 3. Query distinct (track__label_id, frame) from TrackedShape
+  └─ 4. Compute unique image union and coverage metrics
+                 │
+                 ▼
+[cvat.apps.test.websocket_routing.broadcast_analytics_update()]
+                 │
+                 ▼
+[ConnectionGroupManager dispatches JSON event to room: "task_{id}" / "job_{id}"]
+                 │
+                 ▼
+[Browser WebSocket client receives "CLASS_COUNTS_UPDATED"]
+                 │
+                 ▼
+[useRealtimeAnalytics hook updates React state]
+                 │
+                 ▼
+[ClassCountBarChart &amp; ClassDistributionDoughnut re-render via Chart.js]</code></pre><br/><hr/><br/><h2>4. API Design Details</h2><br/><p>The <code>cvat.apps.test</code> Django app exposes three production REST endpoints documented with OpenAPI / DRF Spectacular:</p><br/><h3>4.1 Class-Wise Image Counts</h3><li><strong>URL</strong>: <code>/api/test/analytics/class-counts/</code></li><li><strong>Method</strong>: <code>GET</code></li><li><strong>Query Parameters</strong>:</li><p>  - <code>task_id</code> (optional, integer): Scope analytics to an entire task.</p><p>  - <code>job_id</code> (optional, integer): Scope analytics to a single job segment.</p><p>  - <code>project_id</code> (optional, integer): Scope analytics across all tasks in a project.</p><li><strong>Response Format (<code>200 OK</code>)</strong>:</li><pre class="code-block"><code>{
+  "target": {
+    "scope": "task",
+    "task_id": 14,
+    "task_name": "Autonomous Highway Dataset",
+    "project_id": 2
+  },
+  "summary": {
+    "total_images": 250,
+    "annotated_images": 182,
+    "unannotated_images": 68,
+    "total_classes": 5,
+    "active_classes": 4,
+    "total_annotations": 612,
+    "completion_rate": 72.8
+  },
+  "classes": [
+    {
+      "label_id": 101,
+      "label_name": "vehicle",
+      "color": "#1890ff",
+      "type": "any",
+      "image_count": 164,
+      "annotation_count": 420,
+      "percentage_of_total_images": 65.6,
+      "percentage_of_annotated_images": 90.11
+    },
+    {
+      "label_id": 102,
+      "label_name": "pedestrian",
+      "color": "#52c41a",
+      "type": "any",
+      "image_count": 89,
+      "annotation_count": 142,
+      "percentage_of_total_images": 35.6,
+      "percentage_of_annotated_images": 48.9
+    }
+  ],
+  "timestamp": "2026-09-17T02:00:00.000000+00:00"
+}</code></pre><br/><h3>4.2 Analytics Overview</h3><li><strong>URL</strong>: <code>/api/test/analytics/overview/</code></li><li><strong>Method</strong>: <code>GET</code></li><li><strong>Description</strong>: Returns recent tasks with direct REST and WebSocket connection endpoints.</li><br/><h3>4.3 Simulation Trigger</h3><li><strong>URL</strong>: <code>/api/test/analytics/simulate-update/</code></li><li><strong>Method</strong>: <code>POST</code></li><li><strong>Payload</strong>:</li><pre class="code-block"><code>{
+  "task_id": 14
+}</code></pre><li><strong>Description</strong>: Triggers instantaneous aggregation and pushes a live WebSocket broadcast to all connected clients.</li><br/><hr/><br/><h2>5. WebSocket Implementation Explanation</h2><br/><h3>5.1 Protocol & Route</h3><li><strong>Route</strong>: <code>/ws/test/analytics/?task_id=<id>&job_id=<id></code></li><li><strong>Protocol</strong>: Standard W3C WebSocket over HTTP/1.1 Upgrade (<code>ws://</code> and <code>wss://</code>).</li><li><strong>Server Implementation</strong>: ASGI 3.0 handler integrated into <code>cvat/asgi.py</code> without requiring bulky third-party dependencies that break existing locks.</li><br/><h3>5.2 Room Subscription & Lifecycle</h3><p>1. <strong>Handshake</strong>: Client connects with <code>task_id</code> or <code>job_id</code> query parameters. Uvicorn executes <code>cvat.asgi:application</code>, which directs <code>scope["type"] == "websocket"</code> to <code>websocket_analytics_handler</code>.</p><p>2. <strong>Immediate Snapshot</strong>: Upon connection acceptance (<code>websocket.accept</code>), the handler computes and sends an <code>INITIAL_DATA</code> message so the UI renders immediately without waiting for the first update event.</p><p>3. <strong>Channel Registration</strong>: An asynchronous message queue (<code>asyncio.Queue</code>) is registered in <code>ConnectionGroupManager</code> under the room identifier (<code>task_{id}</code> or <code>job_{id}</code>).</p><p>4. <strong>Heartbeat (Ping/Pong)</strong>: The client transmits a periodic <code>{"action": "ping", "timestamp": ...}</code> every 25 seconds. The server returns a <code>{"event": "pong"}</code> frame to prevent intermediate proxy timeout closures.</p><p>5. <strong>Disconnection Cleanup</strong>: Upon socket close, <code>unregister</code> removes the queue, releasing all coroutine resources and preventing memory leaks.</p><br/><hr/><br/><h2>6. Stability & UI Responsiveness</h2><br/><table><thead><tr><th>Requirement</th><th>Implementation Mechanism</th></tr></thead><tbody><table><thead><tr><th><strong>Connection Drop Recovery</strong></th><th>Client-side `useRealtimeAnalytics` implements exponential backoff retry scheduling: $t = \min(1000 \times 2^{\text{attempts}}, 15000)\text{ ms}$.</th></tr></thead><tbody><table><thead><tr><th><strong>Proxy / Firewall Blockage</strong></th><th>If WebSocket cannot connect after 5 retries, the client automatically degrades to transparent HTTP polling at 5-second intervals.</th></tr></thead><tbody><table><thead><tr><th><strong>Pulsing Status Indicator</strong></th><th>Real-time status tags (`Live WebSocket`, `Reconnecting`, `Polling Fallback`, `Disconnected`) keep the user informed.</th></tr></thead><tbody><table><thead><tr><th><strong>Smooth UI Rendering</strong></th><th>State updates are debounced and processed in React 18 concurrent mode, ensuring zero lag during active annotation drawing.</th></tr></thead><tbody><table><thead><tr><th><strong>Zero N+1 Query Overhead</strong></th><th>Aggregation logic utilizes tuple pair extraction (`values_list("label_id", "frame").distinct()`) across 3 indexed queries rather than looping queries per label.</th></tr></thead><tbody><br/><hr/><br/><h2>7. Challenges Faced and Solutions</h2><br/><h3>Challenge 1: The "Class Count vs Image Count" Aggregation Nuance</h3><li><strong>Problem</strong>: A naive aggregation counting bounding boxes (<code>Count("id")</code>) gives the total number of labels in the dataset, NOT the number of images containing that class. In computer vision analytics, knowing that 100 cars exist across only 10 images is radically different from 100 cars across 100 images.</li><li><strong>Solution</strong>: Designed set union aggregation across all annotation types:</li><p>  $$\text{Frames}(L) = \text{Frames}_{\text{shapes}}(L) \cup \text{Frames}_{\text{tags}}(L) \cup \text{Frames}_{\text{tracks}}(L)$$</p><p>  $$\text{Class Image Count}(L) = |\text{Frames}(L)|$$</p><p>  This accurately reflects unique images per class while also tracking total object volume.</p><br/><h3>Challenge 2: Dual Protocol Routing in Production CVAT</h3><li><strong>Problem</strong>: Standard CVAT utilizes <code>uvicorn</code> pointing to Django's WSGI/ASGI application, but lacks a default WebSocket channel router. Installing third-party routing libraries could cause dependency conflicts with existing pinned versions in CVAT's locked environment.</li><li><strong>Solution</strong>: Authored a native ASGI 3.0 protocol router in <code>cvat/asgi.py</code>. It inspects <code>scope["type"]</code>: standard HTTP requests are forwarded directly to Django's <code>get_asgi_application()</code>, while WebSocket requests are routed to <code>websocket_analytics_handler</code>.</li><br/><h3>Challenge 3: Rapid Drawing Event Bursts</h3><li><strong>Problem</strong>: When an annotator rapidly creates, resizes, or deletes boxes, triggering a broadcast on every single atomic micro-step could flood the database and WebSocket network buffer.</li><li><strong>Solution</strong>: Bound the signal hooks to batch completion (<code>patch_job_data</code> plugin decorator and atomic transactions) and implemented queue-based consumer streaming, decoupling database writes from network broadcasting.</li><br/>
+</body>
+</html>
