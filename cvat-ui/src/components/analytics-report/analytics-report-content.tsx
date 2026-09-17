@@ -16,9 +16,27 @@ interface Props {
     timePeriod: TimePeriod | null;
 }
 
-function AnalyticsReportContent(): JSX.Element {
+import { RealtimeAnalyticsDashboard } from 'components/realtime-analytics';
+
+function AnalyticsReportContent({ resource }: { resource?: Project | Task | Job }): JSX.Element {
+    let taskId: number | undefined;
+    let jobId: number | undefined;
+    let projectId: number | undefined;
+
+    if (resource instanceof Task) {
+        taskId = resource.id;
+    } else if (resource instanceof Job) {
+        jobId = resource.id;
+    } else if (resource instanceof Project) {
+        projectId = resource.id;
+    }
+
     return (
-        <PaidFeaturePlaceholder featureDescription={config.PAID_PLACEHOLDER_CONFIG.features.analyticsReport} />
+        <RealtimeAnalyticsDashboard
+            taskId={taskId}
+            jobId={jobId}
+            projectId={projectId}
+        />
     );
 }
 
@@ -32,7 +50,7 @@ function AnalyticsReportContentWrap(props: Readonly<Props>): JSX.Element {
         return <Component {...props} />;
     }
 
-    return <AnalyticsReportContent />;
+    return <AnalyticsReportContent resource={props.resource} />;
 }
 
 export default React.memo(AnalyticsReportContentWrap);
